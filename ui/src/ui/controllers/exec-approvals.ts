@@ -30,12 +30,37 @@ export type ExecApprovalsFile = {
   agents?: Record<string, ExecApprovalsAgent>;
 };
 
-export type ExecApprovalsSnapshot = {
+export type FileExecApprovalsSnapshot = {
   path: string;
   exists: boolean;
   hash: string;
   file: ExecApprovalsFile;
 };
+
+export type NativeExecApprovalRule = {
+  pattern?: string;
+  action?: string;
+  shells?: string[];
+  description?: string;
+  enabled?: boolean;
+};
+
+export type NativeExecApprovalPolicy = {
+  enabled?: boolean;
+  defaultAction?: string;
+  rules?: NativeExecApprovalRule[];
+};
+
+export type NativeExecApprovalsSnapshot = NativeExecApprovalPolicy & {
+  hash?: string;
+  baseHash?: string;
+  constraints?: Record<string, unknown>;
+  file?: never;
+  path?: never;
+  exists?: never;
+};
+
+export type ExecApprovalsSnapshot = FileExecApprovalsSnapshot | NativeExecApprovalsSnapshot;
 
 export type ExecApprovalsTarget = { kind: "gateway" } | { kind: "node"; nodeId: string };
 
@@ -79,6 +104,19 @@ function resolveExecApprovalsSaveRpc(
   return { method: "exec.approvals.node.set", params: { ...params, nodeId } };
 }
 
+export function isNativeExecApprovalsSnapshot(
+  snapshot: ExecApprovalsSnapshot | null | undefined,
+): snapshot is NativeExecApprovalsSnapshot {
+  if (!snapshot || "file" in snapshot) {
+    return false;
+  }
+  return (
+    Array.isArray(snapshot.rules) ||
+    typeof snapshot.defaultAction === "string" ||
+    typeof snapshot.enabled === "boolean"
+  );
+}
+
 export async function loadExecApprovals(
   state: ExecApprovalsState,
   target?: ExecApprovalsTarget | null,
@@ -108,8 +146,13 @@ export async function loadExecApprovals(
 
 function applyExecApprovalsSnapshot(state: ExecApprovalsState, snapshot: ExecApprovalsSnapshot) {
   state.execApprovalsSnapshot = snapshot;
+  if (isNativeExecApprovalsSnapshot(snapshot)) {
+    state.execApprovalsForm = null;
+    state.execApprovalsDirty = false;
+    return;
+  }
   if (!state.execApprovalsDirty) {
-    state.execApprovalsForm = cloneConfigObject(snapshot.file ?? {});
+    state.execApprovalsForm = cloneConfigObject(snapshot.file);
   }
 }
 
@@ -123,6 +166,11 @@ export async function saveExecApprovals(
   state.execApprovalsSaving = true;
   state.lastError = null;
   try {
+    if (isNativeExecApprovalsSnapshot(state.execApprovalsSnapshot)) {
+      state.lastError =
+        "Native node exec approvals are read-only in Control UI; use the Windows companion or CLI to edit them.";
+      return;
+    }
     const baseHash = state.execApprovalsSnapshot?.hash;
     if (!baseHash) {
       state.lastError = "Exec approvals hash missing; reload and retry.";
@@ -149,6 +197,11 @@ export function updateExecApprovalsFormValue(
   path: Array<string | number>,
   value: unknown,
 ) {
+  if (isNativeExecApprovalsSnapshot(state.execApprovalsSnapshot)) {
+    state.lastError =
+      "Native node exec approvals are read-only in Control UI; use the Windows companion or CLI to edit them.";
+    return;
+  }
   const base = cloneConfigObject(
     state.execApprovalsForm ?? state.execApprovalsSnapshot?.file ?? {},
   );
@@ -161,6 +214,11 @@ export function removeExecApprovalsFormValue(
   state: ExecApprovalsState,
   path: Array<string | number>,
 ) {
+  if (isNativeExecApprovalsSnapshot(state.execApprovalsSnapshot)) {
+    state.lastError =
+      "Native node exec approvals are read-only in Control UI; use the Windows companion or CLI to edit them.";
+    return;
+  }
   const base = cloneConfigObject(
     state.execApprovalsForm ?? state.execApprovalsSnapshot?.file ?? {},
   );
