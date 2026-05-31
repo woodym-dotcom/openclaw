@@ -678,6 +678,8 @@ async function resolveConfiguredGatewayCredentialsForExplicitToken(
         explicitAuth: {},
         urlOverride: undefined,
         urlOverrideSource: undefined,
+        localTokenPrecedence: "config-first",
+        localPasswordPrecedence: "config-first",
       },
       process.env,
     );
