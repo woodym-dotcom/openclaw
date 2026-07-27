@@ -50,6 +50,7 @@ import {
 } from "../../agents/model-selection.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
 import { buildAgentRuntimeOutcomePlan } from "../../agents/runtime-plan/build.js";
+import { isSessionWriteLockTimeoutError } from "../../agents/session-write-lock-error.js";
 import {
   resolveGroupSessionKey,
   type SessionEntry,
@@ -2760,6 +2761,19 @@ export async function runAgentTurnWithFallback(params: {
       }
 
       if (isReplyOperationUserAbort(params.replyOperation)) {
+        return {
+          kind: "final",
+          payload: {
+            text: SILENT_REPLY_TOKEN,
+          },
+        };
+      }
+
+      if (isSessionWriteLockTimeoutError(err)) {
+        defaultRuntime.error(
+          `Embedded agent hit a session write lock before reply; suppressing user-facing failure while the owning turn can finish: ${message}`,
+        );
+        params.replyOperation?.fail("run_failed", err);
         return {
           kind: "final",
           payload: {

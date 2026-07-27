@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-error.js";
+import { SessionWriteLockTimeoutError } from "../../agents/session-write-lock-error.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { ModelDefinitionConfig } from "../../config/types.models.js";
 import { CommandLaneClearedError, GatewayDrainingError } from "../../process/command-queue.js";
@@ -1129,6 +1130,29 @@ describe("runAgentTurnWithFallback", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("suppresses generic user-facing failures for session write lock timeouts", async () => {
+    const { replyOperation, failMock } = createMockReplyOperation();
+    state.runWithModelFallbackMock.mockRejectedValueOnce(
+      new SessionWriteLockTimeoutError({
+        timeoutMs: 60_000,
+        owner: "pid=43 alive=true ageMs=60707",
+        lockPath: "/tmp/session.jsonl.lock",
+      }),
+    );
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const result = await runAgentTurnWithFallback({
+      ...createMinimalRunAgentTurnParams(),
+      replyOperation,
+    });
+
+    expect(result).toEqual({
+      kind: "final",
+      payload: { text: SILENT_REPLY_TOKEN },
+    });
+    expect(failMock).toHaveBeenCalledWith("run_failed", expect.any(SessionWriteLockTimeoutError));
   });
 
   it("passes the reply abort signal to fallback orchestration and candidates", async () => {
