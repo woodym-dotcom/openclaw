@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import { generateSecureToken } from "../infra/secure-random.js";
 import { getPluginToolMeta, type PluginToolMcpMeta } from "../plugins/tools.js";
@@ -25,14 +26,9 @@ import {
 import { ToolInputError, type AnyAgentTool } from "./tools/common.js";
 
 const MAX_REUSABLE_CATALOG_SNAPSHOTS = 256;
-const reusableCatalogSnapshots = new Map<
-  string,
-  { entries: ToolSearchCatalogEntry[]; fingerprint: string }
->();
+const reusableCatalogSnapshots = new Map<string, { fingerprint: string }>();
 const catalogFingerprints = new WeakMap<ToolSearchCatalogSession, string>();
-const catalogToolIdentities = new WeakMap<object, number>();
 const untrustedSchemaIdentities = new WeakMap<object, number>();
-let nextCatalogToolIdentity = 1;
 let nextUntrustedSchemaIdentity = 1;
 
 export function getReusableCatalogSnapshotCountForTest(): number {
@@ -72,17 +68,6 @@ function stableJsonFingerprint(value: unknown, seen = new WeakSet<object>()): st
   return `{${entries.join(",")}}`;
 }
 
-function catalogToolIdentity(tool: CatalogTool): number {
-  const existing = catalogToolIdentities.get(tool);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const next = nextCatalogToolIdentity;
-  nextCatalogToolIdentity += 1;
-  catalogToolIdentities.set(tool, next);
-  return next;
-}
-
 function untrustedSchemaFingerprint(schema: unknown): string {
   if (schema === null || typeof schema !== "object") {
     return stableJsonFingerprint(schema);
@@ -98,8 +83,9 @@ function untrustedSchemaFingerprint(schema: unknown): string {
 }
 
 function catalogEntriesFingerprint(entries: readonly ToolSearchCatalogEntry[]): string {
-  // Executable identities are part of reuse because function bodies are not JSON-stable.
-  return entries
+  // This fingerprint owns the stable directory presentation, not executable
+  // bindings. Each run registers its fresh tool objects after a cache hit.
+  const serialized = entries
     .map((entry) =>
       [
         entry.id,
@@ -117,13 +103,19 @@ function catalogEntriesFingerprint(entries: readonly ToolSearchCatalogEntry[]): 
         entry.source === "openclaw"
           ? stableJsonFingerprint(entry.outputSchema)
           : untrustedSchemaFingerprint(entry.outputSchema),
-        String(catalogToolIdentity(entry.tool)),
       ]
         .map((part) => JSON.stringify(part))
         .join(":"),
     )
     .toSorted()
     .join("\n");
+  return createHash("sha256").update(serialized).digest("hex");
+}
+
+export function getToolSearchCatalogFingerprint(
+  catalog: ToolSearchCatalogSession,
+): string | undefined {
+  return catalogFingerprints.get(catalog);
 }
 
 function restoreToolSearchCatalog(params: {
@@ -153,7 +145,7 @@ function rememberReusableCatalog(key: string | undefined, catalog: ToolSearchCat
   if (reusableCatalogSnapshots.has(key)) {
     reusableCatalogSnapshots.delete(key);
   }
-  reusableCatalogSnapshots.set(key, { entries: catalog.entries, fingerprint });
+  reusableCatalogSnapshots.set(key, { fingerprint });
   pruneMapToMaxSize(reusableCatalogSnapshots, MAX_REUSABLE_CATALOG_SNAPSHOTS);
 }
 
@@ -438,17 +430,14 @@ export function applyToolCatalogCompaction(
     };
   }
 
-  // Hook-wrapped entries carry run context and have fresh executable identities, so
-  // their snapshots cannot be reused and would only retain the completed run.
-  const hasHookBoundEntry = catalog.some((entry) =>
-    isToolWrappedWithBeforeToolCallHook(entry.tool as AnyAgentTool),
-  );
-  const reusableKey = hasHookBoundEntry ? undefined : reusableCatalogKey(params);
+  // Reuse only the semantic directory decision. The restored catalog receives
+  // this run's entries so hook, abort, authorization, and executor state stay fresh.
+  const reusableKey = reusableCatalogKey(params);
   const reusableSnapshot = reusableKey ? reusableCatalogSnapshots.get(reusableKey) : undefined;
   if (reusableSnapshot?.fingerprint === incomingFingerprint) {
     restoreToolSearchCatalog({
       catalogRef,
-      entries: reusableSnapshot.entries,
+      entries: catalog,
       fingerprint: reusableSnapshot.fingerprint,
     });
     if (reusableKey) {

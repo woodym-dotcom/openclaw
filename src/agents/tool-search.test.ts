@@ -3065,7 +3065,8 @@ describe("Tool Search", () => {
     });
     expect(later.catalogReused).toBe(true);
     expect(laterRef.current).not.toBe(catalogAfterFirst);
-    expect(laterRef.current?.entries).toBe(catalogAfterFirst.entries);
+    expect(laterRef.current?.entries).not.toBe(catalogAfterFirst.entries);
+    expect(laterRef.current?.entries.find((entry) => entry.name === alpha.name)?.tool).toBe(alpha);
     expect(laterRef.current?.counterScope).not.toBe(catalogAfterFirst.counterScope);
   });
 
@@ -3116,52 +3117,62 @@ describe("Tool Search", () => {
     expect(second.catalogRegistered).toBe(true);
     expect(second.catalogReused).toBe(true);
     const restoredCatalog = expectDefined(secondRef.current, "restored run catalog");
-    expect(restoredCatalog.entries.find((entry) => entry.name === alpha.name)).toBe(
+    expect(restoredCatalog.entries.find((entry) => entry.name === alpha.name)).not.toBe(
       firstAlphaEntry,
     );
+    expect(restoredCatalog.entries.find((entry) => entry.name === alpha.name)?.tool).toBe(alpha);
     expect(restoredCatalog.counterScope).not.toBe(firstCatalog.counterScope);
     expect(restoredCatalog.searchCount).toBe(0);
   });
 
-  it("does not retain hook-bound catalogs, including prewrapped tools", () => {
+  it("reuses hook-bound directory metadata while rebinding the current executable", () => {
     const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const config = { tools: { toolSearch: true } } as never;
-    const snapshotsBefore = testing.getReusableCatalogSnapshotCountForTest();
-
-    for (const mode of ["context", "prewrapped"] as const) {
-      const sessionId = `session-hook-bound-${mode}`;
-      const runId = `run-hook-bound-${mode}`;
-      const catalogRef = createToolSearchCatalogRef();
-      const hookContext = {
+    const sessionId = "session-hook-bound-reuse";
+    const firstRef = createToolSearchCatalogRef();
+    const firstTarget = pluginTool("fake_hook_bound", "Hook-bound probe tool");
+    applyToolSearchCatalog({
+      tools: [codeTool, firstTarget],
+      config,
+      sessionId,
+      runId: "run-hook-1",
+      catalogRef: firstRef,
+      toolHookContext: {
         agentId: "agent-main",
         sessionId,
         sessionKey: "agent:main:main",
-        runId,
+        runId: "run-hook-1",
         onToolOutcome: vi.fn(),
-      };
-      const target = pluginTool(`fake_hook_bound_${mode}`, "Hook-bound probe tool");
-      const catalogTarget =
-        mode === "prewrapped"
-          ? wrapToolWithAbortSignal(
-              wrapToolWithBeforeToolCallHook(target, hookContext),
-              new AbortController().signal,
-            )
-          : target;
-      applyToolSearchCatalog({
-        tools: [codeTool, catalogTarget],
-        config,
-        sessionId,
-        runId,
-        catalogRef,
-        ...(mode === "context" ? { toolHookContext: hookContext } : {}),
-      });
-      clearToolSearchCatalog({ sessionId, runId, catalogRef });
-    }
+      },
+    });
+    clearToolSearchCatalog({ sessionId, runId: "run-hook-1", catalogRef: firstRef });
 
-    expect(testing.getReusableCatalogSnapshotCountForTest()).toBe(snapshotsBefore);
+    const secondRef = createToolSearchCatalogRef();
+    const secondTarget = pluginTool("fake_hook_bound", "Hook-bound probe tool");
+    const second = applyToolSearchCatalog({
+      tools: [codeTool, secondTarget],
+      config,
+      sessionId,
+      runId: "run-hook-2",
+      catalogRef: secondRef,
+      toolHookContext: {
+        agentId: "agent-main",
+        sessionId,
+        sessionKey: "agent:main:main",
+        runId: "run-hook-2",
+        onToolOutcome: vi.fn(),
+      },
+    });
+
+    expect(second.catalogReused).toBe(true);
+    const rebound = secondRef.current?.entries.find(
+      (entry) => entry.name === secondTarget.name,
+    )?.tool;
+    expect(rebound).not.toBe(firstTarget);
+    expect(isToolWrappedWithBeforeToolCallHook(rebound as AnyAgentTool)).toBe(true);
   });
 
-  it("does not reuse when a same-named tool uses a different executable", () => {
+  it("reuses directory metadata but binds a same-named replacement executable", () => {
     const codeTool = fakeTool(TOOL_SEARCH_CODE_MODE_TOOL_NAME, "code mode");
     const original = pluginTool("fake_exec_swap", "Stable description");
     const config = { tools: { toolSearch: true } } as never;
@@ -3190,7 +3201,7 @@ describe("Tool Search", () => {
       runId: "run-exec-2",
       catalogRef: secondRef,
     });
-    expect(second.catalogReused).toBe(false);
+    expect(second.catalogReused).toBe(true);
     expect(secondRef.current?.entries.find((entry) => entry.name === replacement.name)?.tool).toBe(
       replacement,
     );

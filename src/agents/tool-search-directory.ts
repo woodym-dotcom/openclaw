@@ -1,8 +1,10 @@
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
+import { pruneMapToMaxSize } from "../infra/map-size.js";
 import {
   applyToolCatalogCompaction,
   collectUniqueCatalogToolNames,
+  getToolSearchCatalogFingerprint,
   isDirectVisibleCatalogTool,
   resolveCatalog,
   visibleCatalogEntries,
@@ -21,10 +23,11 @@ import {
 import { ToolInputError, type AnyAgentTool } from "./tools/common.js";
 
 export const MAX_TOOL_SCHEMA_DIRECTORY_PROMPT_CHARS = 18_000;
+const MAX_TOOL_SCHEMA_DIRECTORY_PROMPTS = 256;
 const TOOL_DIRECTORY_IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
-// Catalog entry arrays are immutable snapshots. Keying their rendered directory by
-// array identity preserves prompt-prefix bytes without retaining retired catalogs.
-const toolSchemaDirectoryPromptCache = new WeakMap<ToolSearchCatalogEntry[], Map<string, string>>();
+// Directory text is capability metadata, not run state. A semantic key lets
+// adjacent turns reuse identical prompt bytes while executable bindings stay fresh.
+const toolSchemaDirectoryPromptCache = new Map<string, string>();
 
 export function applyToolSchemaDirectoryCatalog(params: {
   tools: AnyAgentTool[];
@@ -75,9 +78,9 @@ export function buildToolSchemaDirectoryPrompt(
 ): string {
   const config = resolveToolSearchConfig(ctx.runtimeConfig ?? ctx.config);
   const catalog = resolveCatalog(ctx);
-  const cacheKey = `${config.mode}:${options?.includeMcp === false ? "without-mcp" : "all"}`;
-  let cachedPrompts = toolSchemaDirectoryPromptCache.get(catalog.entries);
-  const cachedPrompt = cachedPrompts?.get(cacheKey);
+  const fingerprint = getToolSearchCatalogFingerprint(catalog);
+  const cacheKey = `${fingerprint ?? "uncached"}:${config.mode}:${options?.includeMcp === false ? "without-mcp" : "all"}`;
+  const cachedPrompt = fingerprint ? toolSchemaDirectoryPromptCache.get(cacheKey) : undefined;
   if (cachedPrompt !== undefined) {
     return cachedPrompt;
   }
@@ -85,11 +88,13 @@ export function buildToolSchemaDirectoryPrompt(
     visibleCatalogEntries(catalog, options),
     config.mode,
   );
-  if (!cachedPrompts) {
-    cachedPrompts = new Map<string, string>();
-    toolSchemaDirectoryPromptCache.set(catalog.entries, cachedPrompts);
+  if (fingerprint) {
+    if (toolSchemaDirectoryPromptCache.has(cacheKey)) {
+      toolSchemaDirectoryPromptCache.delete(cacheKey);
+    }
+    toolSchemaDirectoryPromptCache.set(cacheKey, prompt);
+    pruneMapToMaxSize(toolSchemaDirectoryPromptCache, MAX_TOOL_SCHEMA_DIRECTORY_PROMPTS);
   }
-  cachedPrompts.set(cacheKey, prompt);
   return prompt;
 }
 
